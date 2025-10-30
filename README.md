@@ -665,7 +665,31 @@ This library provides a **transport layer** implementation for JSON-RPC 2.0:
 
 ## Testing
 
-Run the included examples:
+### Running Tests
+
+```bash
+# Run all tests
+vendor/bin/phpunit
+
+# Run tests with detailed output
+vendor/bin/phpunit --testdox
+
+# Run specific test file
+vendor/bin/phpunit tests/AccessLogHandlerTest.php
+```
+
+### Test Coverage
+
+The test suite includes:
+
+- ✅ **AccessLogHandler**: Tests for logging, JSON-RPC info extraction, and formatting
+- ✅ **HttpServer**: Tests for server creation, access log integration, and HTTP server instance retrieval
+- ✅ **HttpClient**: Tests for client creation and access log integration
+- ✅ **TcpServer**: Tests for server creation, access log integration, closing, and socket server retrieval
+- ✅ **TcpClient**: Tests for client creation, connector, and access log integration
+- ✅ **Evaluator**: Tests for interface implementation and inheritance
+
+### Running Examples
 
 ```bash
 # Terminal 1: Start server
