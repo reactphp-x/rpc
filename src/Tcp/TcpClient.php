@@ -4,14 +4,15 @@ declare(strict_types=1);
 
 namespace ReactphpX\Rpc\Tcp;
 
-use Clue\React\Ndjson\Decoder;
-use Clue\React\Ndjson\Encoder;
+use Clue\React\NDJson\Decoder;
+use Clue\React\NDJson\Encoder;
 use Datto\JsonRpc\Client as JsonRpcClient;
 use Datto\JsonRpc\Responses\ErrorResponse;
 use Datto\JsonRpc\Responses\ResultResponse;
 use React\Socket\ConnectionInterface;
 use React\Socket\Connector;
 use React\Promise\PromiseInterface;
+use ReactphpX\Rpc\AccessLogHandler;
 
 /**
  * TCP-based JSON-RPC Client using NDJSON
@@ -25,11 +26,13 @@ class TcpClient
     private array $pendingRequests = [];
     private int $idCounter = 1;
     private ?PromiseInterface $connectingPromise = null;
+    private ?AccessLogHandler $accessLog;
 
-    public function __construct(private string $uri, private ?Connector $connector = null)
+    public function __construct(private string $uri, private ?Connector $connector = null, ?AccessLogHandler $accessLog = null)
     {
         $this->client = new JsonRpcClient();
         $this->connector = $connector ?? new Connector();
+        $this->accessLog = $accessLog;
     }
 
     /**
@@ -93,19 +96,32 @@ class TcpClient
     public function call(string $method, ?array $arguments = null): PromiseInterface
     {
         return $this->connect()->then(function () use ($method, $arguments) {
+            $startTime = microtime(true);
             $id = $this->idCounter++;
             
             $this->client->query($id, $method, $arguments);
             $request = $this->client->preEncode();
             
-            if ($request === null || !isset($request[0])) {
+            if ($request === null) {
                 return \React\Promise\reject(new \RuntimeException('Failed to create request'));
             }
 
-            $deferred = new \React\Promise\Deferred();
-            $this->pendingRequests[$id] = $deferred;
+            // preEncode returns single request object (associative array) for one request
+            $requestBody = json_encode($request);
+            
+            // Extract JSON-RPC info
+            $rpcInfo = $this->accessLog ? $this->accessLog->extractRpcInfo($requestBody) : [];
 
-            $this->encoder->write($request[0]);
+            $deferred = new \React\Promise\Deferred();
+            $this->pendingRequests[$id] = [
+                'deferred' => $deferred,
+                'startTime' => $startTime,
+                'rpcInfo' => $rpcInfo,
+                'method' => $method,
+                'requestBody' => $requestBody,
+            ];
+
+            $this->encoder->write($request);
 
             return $deferred->promise();
         });
@@ -121,14 +137,32 @@ class TcpClient
     public function notify(string $method, ?array $arguments = null): PromiseInterface
     {
         return $this->connect()->then(function () use ($method, $arguments) {
+            $startTime = microtime(true);
             $this->client->notify($method, $arguments);
             $request = $this->client->preEncode();
             
-            if ($request === null || !isset($request[0])) {
+            if ($request === null) {
                 return \React\Promise\reject(new \RuntimeException('Failed to create request'));
             }
 
-            $this->encoder->write($request[0]);
+            // preEncode returns single request object (associative array) for one request
+            $requestBody = json_encode($request);
+            
+            // Extract JSON-RPC info
+            $rpcInfo = $this->accessLog ? $this->accessLog->extractRpcInfo($requestBody) : [];
+
+            // Log notification
+            if ($this->accessLog) {
+                $duration = microtime(true) - $startTime;
+                $this->accessLog->log('NOTIFICATION', array_merge([
+                    'uri' => $this->uri,
+                    'request_body' => $requestBody,
+                    'duration' => $duration,
+                    'rpc_method' => $method,
+                ], $rpcInfo));
+            }
+
+            $this->encoder->write($request);
             return null;
         });
     }
@@ -139,6 +173,8 @@ class TcpClient
     private function handleResponse(array $data): void
     {
         try {
+            $responseBody = json_encode($data);
+
             $responses = $this->client->postDecode($data);
             
             if (empty($responses)) {
@@ -158,8 +194,24 @@ class TcpClient
                 return;
             }
 
-            $deferred = $this->pendingRequests[$id];
+            $requestInfo = $this->pendingRequests[$id];
             unset($this->pendingRequests[$id]);
+
+            $duration = microtime(true) - $requestInfo['startTime'];
+
+            // Log response
+            if ($this->accessLog) {
+                $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
+                $this->accessLog->log('RESPONSE', array_merge([
+                    'uri' => $this->uri,
+                    'request_body' => $requestInfo['requestBody'],
+                    'response_body' => $responseBody,
+                    'duration' => $duration,
+                    'rpc_method' => $requestInfo['method'],
+                ], $requestInfo['rpcInfo'], $rpcResponseInfo));
+            }
+
+            $deferred = $requestInfo['deferred'];
 
             if ($response instanceof ErrorResponse) {
                 $deferred->reject(new \RuntimeException(
@@ -197,8 +249,8 @@ class TcpClient
         $this->client->reset();
         
         // Reject all pending requests
-        foreach ($this->pendingRequests as $deferred) {
-            $deferred->reject(new \RuntimeException('Connection closed'));
+        foreach ($this->pendingRequests as $requestInfo) {
+            $requestInfo['deferred']->reject(new \RuntimeException('Connection closed'));
         }
         $this->pendingRequests = [];
     }
