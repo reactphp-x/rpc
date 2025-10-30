@@ -148,4 +148,9 @@ class TcpServer
     {
         $this->socketServer->close();
     }
+
+    public function __destruct()
+    {
+        $this->close();
+    }
 }

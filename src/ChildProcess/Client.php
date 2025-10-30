@@ -396,5 +396,10 @@ class Client
         }
         $this->batchStates = [];
     }
+
+    public function __destruct()
+    {
+        $this->close();
+    }
 }
 
