@@ -8,6 +8,8 @@ use React\EventLoop\Loop;
 use React\Http\Browser;
 use ReactphpX\Rpc\Http\HttpClient;
 use ReactphpX\Rpc\AccessLogHandler;
+use Datto\JsonRpc\Responses\ErrorResponse;
+use Datto\JsonRpc\Responses\ResultResponse;
 
 /**
  * Example HTTP JSON-RPC Client
@@ -74,6 +76,30 @@ $client->notify('echo', ['message' => 'This is a notification'])
     ->then(function () {
         echo "Notification sent successfully\n";
     });
+
+echo "Calling batch methods...\n";
+
+$client->batch([
+    ['add', [2, 3]],
+    ['subtract', [10, 4]],
+    ['greet', ['name' => 'Bob']],
+    ['echo', ['message' => 'This is a notification']],
+])
+->then(function ($responses) {
+    echo "Batch results (" . count($responses) . " responses):\n";
+    foreach ($responses as $index => $response) {
+        if ($response instanceof ResultResponse) {
+            echo "  [$index] Result: " . json_encode($response->getValue()) . "\n";
+        } elseif ($response instanceof ErrorResponse) {
+            echo "  [$index] Error: " . $response->getMessage() . " (code: " . $response->getCode() . ")\n";
+        } else {
+            echo "  [$index] Unknown response type\n";
+        }
+    }
+})
+->catch(function ($error) {
+    echo "Batch error: " . $error->getMessage() . "\n";
+});
 
 // Run for a short time then exit
 $loop->addTimer(2.0, function () use ($loop) {

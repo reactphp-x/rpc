@@ -223,7 +223,16 @@ class HttpClient
                 throw new \RuntimeException('HTTP error: ' . $response->getStatusCode());
             }
 
-            return $this->client->decode($body);
+            if (empty($body)) {
+                throw new \RuntimeException('Empty response body');
+            }
+
+            try {
+                $responses = $this->client->decode($body);
+                return $responses;
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('Failed to decode batch response: ' . $e->getMessage(), 0, $e);
+            }
         });
     }
 

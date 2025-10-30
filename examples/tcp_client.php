@@ -8,6 +8,8 @@ use React\EventLoop\Loop;
 use React\Socket\Connector;
 use ReactphpX\Rpc\Tcp\TcpClient;
 use ReactphpX\Rpc\AccessLogHandler;
+use Datto\JsonRpc\Responses\ErrorResponse;
+use Datto\JsonRpc\Responses\ResultResponse;
 
 /**
  * Example TCP JSON-RPC Client using NDJSON
@@ -75,8 +77,32 @@ $client->notify('echo', ['message' => 'This is a notification'])
         echo "Notification sent successfully\n";
     });
 
+echo "Calling batch methods...\n";
+
+$client->batch([
+    ['add', [2, 3]],
+    ['subtract', [10, 4]],
+    ['greet', ['name' => 'Bob']],
+    ['echo', ['message' => 'This is a notification']],
+])
+->then(function ($responses) {
+    echo "Batch results (" . count($responses) . " responses):\n";
+    foreach ($responses as $index => $response) {
+        if ($response instanceof ResultResponse) {
+            echo "  [$index] Result: " . json_encode($response->getValue()) . "\n";
+        } elseif ($response instanceof ErrorResponse) {
+            echo "  [$index] Error: " . $response->getMessage() . " (code: " . $response->getCode() . ")\n";
+        } else {
+            echo "  [$index] Unknown response type\n";
+        }
+    }
+})
+->catch(function ($error) {
+    echo "Batch error: " . $error->getMessage() . "\n";
+});
+
 // Run for a short time then exit
-$loop->addTimer(2.0, function () use ($loop, $client) {
+$loop->addTimer(3.0, function () use ($loop, $client) {
     echo "\nClosing connection...\n";
     $client->close();
     $loop->stop();

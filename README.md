@@ -251,9 +251,10 @@ new TcpClient(
 - `$accessLog`: Optional `AccessLogHandler` instance for logging requests/responses
 
 **Methods:**
-- `connect(): PromiseInterface` - Connect to the server (automatically called by `call()` and `notify()`)
+- `connect(): PromiseInterface` - Connect to the server (automatically called by `call()`, `notify()`, and `batch()`)
 - `call(string $method, ?array $arguments = null): PromiseInterface` - Call a JSON-RPC method and get result
 - `notify(string $method, ?array $arguments = null): PromiseInterface` - Send a notification (no response expected)
+- `batch(array $calls, float $timeout = 5.0): PromiseInterface` - Call multiple methods in batch. Each call is an array: `[method, arguments, id?]` where `id` is optional. `$timeout` specifies the timeout in seconds (default: 5.0)
 - `close(): void` - Close the connection
 
 **Features:**
@@ -543,6 +544,9 @@ $client->notify('log', ['message' => 'Something happened']);
 HTTP client supports batch requests (multiple JSON-RPC calls in a single HTTP request):
 
 ```php
+use Datto\JsonRpc\Responses\ErrorResponse;
+use Datto\JsonRpc\Responses\ResultResponse;
+
 $client->batch([
     ['add', [2, 3]],                    // Auto-generated ID
     ['subtract', [10, 4], 100],         // Custom ID: 100
@@ -550,11 +554,11 @@ $client->batch([
 ])
     ->then(function ($responses) {
         // $responses is an array of Response objects
-        foreach ($responses as $response) {
-            if ($response instanceof \Datto\JsonRpc\Responses\ResultResponse) {
-                echo "Result: " . $response->getValue() . "\n";
-            } elseif ($response instanceof \Datto\JsonRpc\Responses\ErrorResponse) {
-                echo "Error: " . $response->getMessage() . "\n";
+        foreach ($responses as $index => $response) {
+            if ($response instanceof ResultResponse) {
+                echo "[$index] Result: " . json_encode($response->getValue()) . "\n";
+            } elseif ($response instanceof ErrorResponse) {
+                echo "[$index] Error: " . $response->getMessage() . " (code: " . $response->getCode() . ")\n";
             }
         }
     })
@@ -570,7 +574,47 @@ Each call in the batch array can be:
 - `[method, arguments]` - Uses auto-generated ID
 - `[method, arguments, id]` - Uses the specified ID
 
-**Note:** TCP client does not support batch requests. Use multiple `call()` or `notify()` invocations instead.
+**TCP Batch Requests:**
+
+TCP client also supports batch requests, but uses NDJSON format (each request/response is a separate line):
+
+```php
+use Datto\JsonRpc\Responses\ErrorResponse;
+use Datto\JsonRpc\Responses\ResultResponse;
+
+// Default timeout (5.0 seconds)
+$client->batch([
+    ['add', [2, 3]],
+    ['subtract', [10, 4], 100],  // Custom ID: 100
+    ['multiply', [5, 6]],
+])
+    ->then(function ($responses) {
+        // $responses is an array of Response objects
+        foreach ($responses as $index => $response) {
+            if ($response instanceof ResultResponse) {
+                echo "[$index] Result: " . json_encode($response->getValue()) . "\n";
+            } elseif ($response instanceof ErrorResponse) {
+                echo "[$index] Error: " . $response->getMessage() . " (code: " . $response->getCode() . ")\n";
+            }
+        }
+    })
+    ->catch(function ($error) {
+        // Handle batch request failure
+        echo "Batch error: " . $error->getMessage() . "\n";
+    });
+
+// Custom timeout (10 seconds)
+$client->batch([
+    ['add', [2, 3]],
+    ['subtract', [10, 4]],
+], 10.0)
+    ->then(function ($responses) {
+        // Handle responses
+    });
+
+**Difference between HTTP and TCP batch:**
+- **HTTP**: Sends all requests in a single JSON array, receives a single JSON array response
+- **TCP**: Sends each request as a separate NDJSON line, receives each response as a separate NDJSON line
 
 ## License
 

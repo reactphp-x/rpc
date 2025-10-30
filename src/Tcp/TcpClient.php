@@ -24,7 +24,9 @@ class TcpClient
     private ?Decoder $decoder = null;
     private ?Encoder $encoder = null;
     private array $pendingRequests = [];
+    private array $batchStates = [];
     private int $idCounter = 1;
+    private int $batchIdCounter = 1;
     private ?PromiseInterface $connectingPromise = null;
     private ?AccessLogHandler $accessLog;
 
@@ -168,6 +170,111 @@ class TcpClient
     }
 
     /**
+     * Call multiple methods in batch
+     *
+     * For TCP transport, each request is sent as a separate NDJSON line.
+     * Responses are collected and returned as an array.
+     *
+     * @param array $calls Array of [method, arguments, id?] pairs
+     * @param float $timeout Timeout in seconds (default: 5.0)
+     * @return PromiseInterface Promise that resolves to array of Response objects
+     */
+    public function batch(array $calls, float $timeout = 5.0): PromiseInterface
+    {
+        return $this->connect()->then(function () use ($calls, $timeout) {
+            $startTime = microtime(true);
+            $requestIds = [];
+            $batchInfo = [];
+            $batchId = $this->batchIdCounter++;
+            
+            // Send all requests
+            foreach ($calls as $index => $call) {
+                $method = $call[0];
+                $arguments = $call[1] ?? null;
+                
+                // Determine ID
+                if (isset($call[2])) {
+                    $id = $call[2];
+                } else {
+                    $id = $this->idCounter++;
+                }
+                
+                $requestIds[] = $id;
+                
+                $this->client->query($id, $method, $arguments);
+                $request = $this->client->preEncode();
+                
+                if ($request === null) {
+                    return \React\Promise\reject(new \RuntimeException('Failed to create request for batch call ' . $index));
+                }
+                
+                $requestBody = json_encode($request);
+                $rpcInfo = $this->accessLog ? $this->accessLog->extractRpcInfo($requestBody) : [];
+                
+                $batchInfo[$id] = [
+                    'index' => $index,
+                    'method' => $method,
+                    'requestBody' => $requestBody,
+                    'rpcInfo' => $rpcInfo,
+                    'startTime' => microtime(true),
+                ];
+                
+                $this->encoder->write($request);
+            }
+            
+            // Create deferred promise for batch
+            $batchDeferred = new \React\Promise\Deferred();
+            $expectedCount = count($requestIds);
+            
+            // Initialize batch state
+            $this->batchStates[$batchId] = [
+                'deferred' => $batchDeferred,
+                'responses' => [],
+                'responseCount' => 0,
+                'expectedCount' => $expectedCount,
+                'requestIds' => $requestIds,
+            ];
+            
+            // Create individual deferred promises for each request
+            foreach ($requestIds as $id) {
+                $individualDeferred = new \React\Promise\Deferred();
+                $this->pendingRequests[$id] = [
+                    'deferred' => $individualDeferred,
+                    'startTime' => $batchInfo[$id]['startTime'],
+                    'rpcInfo' => $batchInfo[$id]['rpcInfo'],
+                    'method' => $batchInfo[$id]['method'],
+                    'requestBody' => $batchInfo[$id]['requestBody'],
+                    'batchId' => $batchId,
+                    'batchIndex' => $batchInfo[$id]['index'],
+                ];
+            }
+            
+            // Set timeout for batch
+            $timeoutTimer = null;
+            if ($timeout > 0) {
+                $timeoutTimer = \React\EventLoop\Loop::get()->addTimer($timeout, function () use ($batchDeferred, $batchId, $timeout) {
+                    if (isset($this->batchStates[$batchId])) {
+                        unset($this->batchStates[$batchId]);
+                        $batchDeferred->reject(new \RuntimeException('Batch request timeout after ' . $timeout . ' seconds'));
+                    }
+                });
+            }
+            
+            // Clean up timeout when batch completes
+            $batchPromise = $batchDeferred->promise()->finally(function () use ($timeoutTimer, $batchId) {
+                if ($timeoutTimer !== null) {
+                    \React\EventLoop\Loop::get()->cancelTimer($timeoutTimer);
+                }
+                if (isset($this->batchStates[$batchId])) {
+                    unset($this->batchStates[$batchId]);
+                }
+            });
+            
+            return $batchPromise;
+        });
+    }
+
+    /**
      * Handle a response from the server
      */
     private function handleResponse(array $data): void
@@ -199,27 +306,68 @@ class TcpClient
 
             $duration = microtime(true) - $requestInfo['startTime'];
 
-            // Log response
-            if ($this->accessLog) {
-                $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
-                $this->accessLog->log('RESPONSE', array_merge([
-                    'uri' => $this->uri,
-                    'request_body' => $requestInfo['requestBody'],
-                    'response_body' => $responseBody,
-                    'duration' => $duration,
-                    'rpc_method' => $requestInfo['method'],
-                ], $requestInfo['rpcInfo'], $rpcResponseInfo));
-            }
+            // Check if this is part of a batch request
+            $isBatch = isset($requestInfo['batchId']);
+            
+            if ($isBatch) {
+                // Batch request handling
+                $batchId = $requestInfo['batchId'];
+                $batchIndex = $requestInfo['batchIndex'];
+                
+                if (!isset($this->batchStates[$batchId])) {
+                    // Batch state was cleaned up (timeout or error)
+                    return;
+                }
+                
+                $batchState = &$this->batchStates[$batchId];
+                
+                // Store response at correct index
+                $batchState['responses'][$batchIndex] = $response;
+                $batchState['responseCount']++;
+                
+                // Log response
+                if ($this->accessLog) {
+                    $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
+                    $this->accessLog->log('RESPONSE', array_merge([
+                        'uri' => $this->uri,
+                        'request_body' => $requestInfo['requestBody'],
+                        'response_body' => $responseBody,
+                        'duration' => $duration,
+                        'rpc_method' => $requestInfo['method'],
+                        'batch_index' => $batchIndex,
+                    ], $requestInfo['rpcInfo'], $rpcResponseInfo));
+                }
+                
+                // Check if all responses received
+                if ($batchState['responseCount'] >= $batchState['expectedCount']) {
+                    // Sort responses by index to maintain order
+                    ksort($batchState['responses']);
+                    $batchState['deferred']->resolve(array_values($batchState['responses']));
+                }
+            } else {
+                // Single request handling
+                // Log response
+                if ($this->accessLog) {
+                    $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
+                    $this->accessLog->log('RESPONSE', array_merge([
+                        'uri' => $this->uri,
+                        'request_body' => $requestInfo['requestBody'],
+                        'response_body' => $responseBody,
+                        'duration' => $duration,
+                        'rpc_method' => $requestInfo['method'],
+                    ], $requestInfo['rpcInfo'], $rpcResponseInfo));
+                }
 
-            $deferred = $requestInfo['deferred'];
+                $deferred = $requestInfo['deferred'];
 
-            if ($response instanceof ErrorResponse) {
-                $deferred->reject(new \RuntimeException(
-                    $response->getMessage(),
-                    $response->getCode()
-                ));
-            } elseif ($response instanceof ResultResponse) {
-                $deferred->resolve($response->getValue());
+                if ($response instanceof ErrorResponse) {
+                    $deferred->reject(new \RuntimeException(
+                        $response->getMessage(),
+                        $response->getCode()
+                    ));
+                } elseif ($response instanceof ResultResponse) {
+                    $deferred->resolve($response->getValue());
+                }
             }
         } catch (\Throwable $e) {
             // Invalid response format - ignore
@@ -253,5 +401,11 @@ class TcpClient
             $requestInfo['deferred']->reject(new \RuntimeException('Connection closed'));
         }
         $this->pendingRequests = [];
+        
+        // Reject all batch requests
+        foreach ($this->batchStates as $batchState) {
+            $batchState['deferred']->reject(new \RuntimeException('Connection closed'));
+        }
+        $this->batchStates = [];
     }
 }
