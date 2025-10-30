@@ -6,12 +6,14 @@ A ReactPHP-based JSON-RPC library that provides HTTP and TCP transport implement
 
 - ✅ **HTTP Transport**: Full HTTP/HTTPS support using ReactPHP HTTP
 - ✅ **TCP Transport**: TCP-based transport using NDJSON (Newline Delimited JSON)
+- ✅ **ChildProcess Transport**: Inter-process communication using child processes
 - ✅ **JSON-RPC 2.0**: Full compliance with JSON-RPC 2.0 specification
 - ✅ **Async/Await**: Built on ReactPHP for non-blocking, event-driven operations
 - ✅ **Type Safety**: Full PHP 8.1+ type hints and strict types
 - ✅ **Access Logging**: Built-in `AccessLogHandler` for detailed request/response logging
 - ✅ **Error Handling**: Comprehensive error handling with JSON-RPC 2.0 compliant error responses
 - ✅ **Persistent Connections**: TCP transport supports persistent connections for better performance
+- ✅ **Batch Requests**: Support for batch JSON-RPC calls on all transports
 
 ## Installation
 
