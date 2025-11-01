@@ -47,14 +47,14 @@ class HttpServer
     private function createRequestHandler(): callable
     {
         return function (ServerRequestInterface $request): PromiseInterface {
-            return \React\Promise\resolve($this->handleRequest($request));
+            return $this->handleRequest($request);
         };
     }
 
     /**
      * Handle HTTP request
      */
-    private function handleRequest(ServerRequestInterface $request): Response
+    private function handleRequest(ServerRequestInterface $request): PromiseInterface
     {
         $startTime = microtime(true);
         $remote = $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown';
@@ -79,7 +79,7 @@ class HttpServer
                 ]);
             }
             
-            return $response;
+            return \React\Promise\resolve($response);
         }
 
         // Get request body
@@ -103,7 +103,7 @@ class HttpServer
                 ]);
             }
             
-            return $response;
+            return \React\Promise\resolve($response);
         }
 
         // Extract JSON-RPC info
@@ -112,6 +112,73 @@ class HttpServer
         // Process JSON-RPC request
         try {
             $responseBody = $this->rpcServer->reply($body);
+            
+            // Check if response contains a Promise in the result field
+            if ($responseBody !== null) {
+                $decoded = json_decode($responseBody, true);
+                if (is_array($decoded) && isset($decoded['result']) && $decoded['result'] instanceof PromiseInterface) {
+                    // Wait for Promise to resolve
+                    return $decoded['result']->then(function ($resolvedValue) use ($request, $startTime, $remote, $method, $uri, $body, $rpcInfo, $decoded) {
+                        $duration = microtime(true) - $startTime;
+                        $responseBody = json_encode([
+                            'jsonrpc' => '2.0',
+                            'id' => $decoded['id'] ?? null,
+                            'result' => $resolvedValue
+                        ]);
+                        
+                        // Log response
+                        if ($this->accessLog) {
+                            $context = array_merge([
+                                'remote' => $remote,
+                                'method' => $method,
+                                'uri' => $uri,
+                                'request_body' => $body,
+                                'response_body' => $responseBody,
+                                'duration' => $duration,
+                                'status' => 200,
+                            ], $rpcInfo);
+                            $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
+                            $context = array_merge($context, $rpcResponseInfo);
+                            $this->accessLog->log('RESPONSE', $context);
+                        }
+                        
+                        return new Response(
+                            200,
+                            ['Content-Type' => 'application/json'],
+                            $responseBody
+                        );
+                    })->catch(function (\Throwable $e) use ($request, $startTime, $remote, $method, $uri, $body, $rpcInfo, $decoded) {
+                        $duration = microtime(true) - $startTime;
+                        
+                        // Log error
+                        if ($this->accessLog) {
+                            $this->accessLog->log('REQUEST', array_merge([
+                                'remote' => $remote,
+                                'method' => $method,
+                                'uri' => $uri,
+                                'request_body' => $body,
+                                'status' => 500,
+                                'duration' => $duration,
+                                'error' => $e->getMessage(),
+                            ], $rpcInfo));
+                        }
+                        
+                        return new Response(
+                            500,
+                            ['Content-Type' => 'application/json'],
+                            json_encode([
+                                'jsonrpc' => '2.0',
+                                'id' => $decoded['id'] ?? null,
+                                'error' => [
+                                    'code' => -32603,
+                                    'message' => 'Internal error',
+                                    'data' => $e->getMessage()
+                                ]
+                            ])
+                        );
+                    });
+                }
+            }
         } catch (\Throwable $e) {
             $duration = microtime(true) - $startTime;
             
@@ -129,7 +196,7 @@ class HttpServer
             }
             
             // Return error response
-            return new Response(
+            return \React\Promise\resolve(new Response(
                 500,
                 ['Content-Type' => 'application/json'],
                 json_encode([
@@ -141,7 +208,7 @@ class HttpServer
                         'data' => $e->getMessage()
                     ]
                 ])
-            );
+            ));
         }
         
         $duration = microtime(true) - $startTime;
@@ -172,14 +239,14 @@ class HttpServer
 
         // Notifications return 204 No Content
         if ($responseBody === null) {
-            return new Response(204);
+            return \React\Promise\resolve(new Response(204));
         }
 
-        return new Response(
+        return \React\Promise\resolve(new Response(
             200,
             ['Content-Type' => 'application/json'],
             $responseBody
-        );
+        ));
     }
 
     /**

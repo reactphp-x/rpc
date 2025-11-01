@@ -11,6 +11,7 @@ use React\Socket\ConnectionInterface;
 use React\Socket\SocketServer;
 use ReactphpX\Rpc\Evaluator;
 use ReactphpX\Rpc\AccessLogHandler;
+use React\Promise\PromiseInterface;
 use function React\Async\async;
 
 /**
@@ -79,6 +80,58 @@ class TcpServer
         // Process JSON-RPC request
         try {
             $response = $this->rpcServer->rawReply($data);
+            
+            // Check if response has a 'result' field that is a Promise
+            if (is_array($response) && isset($response['result']) && $response['result'] instanceof PromiseInterface) {
+                // Wait for the Promise to resolve
+                $response['result']->then(function ($resolvedValue) use ($encoder, $response, $data, $requestBody, $rpcInfo, $startTime) {
+                    $duration = microtime(true) - $startTime;
+                    $finalResponse = [
+                        'jsonrpc' => '2.0',
+                        'id' => $data['id'] ?? null,
+                        'result' => $resolvedValue
+                    ];
+                    
+                    // Log response
+                    if ($this->accessLog) {
+                        $responseBody = json_encode($finalResponse);
+                        $context = array_merge([
+                            'request_body' => $requestBody,
+                            'response_body' => $responseBody,
+                            'duration' => $duration,
+                        ], $rpcInfo);
+                        $rpcResponseInfo = $this->accessLog->extractRpcResponseInfo($responseBody);
+                        $context = array_merge($context, $rpcResponseInfo);
+                        $this->accessLog->log('RESPONSE', $context);
+                    }
+                    
+                    $encoder->write($finalResponse);
+                })->catch(function (\Throwable $e) use ($encoder, $data, $requestBody, $rpcInfo, $startTime) {
+                    $duration = microtime(true) - $startTime;
+                    
+                    // Log error
+                    if ($this->accessLog) {
+                        $this->accessLog->log('REQUEST', array_merge([
+                            'request_body' => $requestBody,
+                            'duration' => $duration,
+                            'error' => $e->getMessage(),
+                        ], $rpcInfo));
+                    }
+                    
+                    // Send error response
+                    $errorResponse = [
+                        'jsonrpc' => '2.0',
+                        'id' => $data['id'] ?? null,
+                        'error' => [
+                            'code' => -32603,
+                            'message' => 'Internal error',
+                            'data' => $e->getMessage()
+                        ]
+                    ];
+                    $encoder->write($errorResponse);
+                });
+                return;
+            }
         } catch (\Throwable $e) {
             $duration = microtime(true) - $startTime;
             

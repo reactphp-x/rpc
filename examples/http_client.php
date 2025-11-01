@@ -77,6 +77,18 @@ $client->notify('echo', ['message' => 'This is a notification'])
         echo "Notification sent successfully\n";
     });
 
+echo "Calling async_fetch (single call)...\n";
+$singleStartTime = microtime(true);
+$client->call('async_fetch', ['url' => 'https://example.com/api/user'])
+    ->then(function ($result) use ($singleStartTime) {
+        $singleDuration = microtime(true) - $singleStartTime;
+        echo "Result: " . json_encode($result) . "\n";
+        echo "Single call duration: " . number_format($singleDuration * 1000, 2) . "ms\n";
+    })
+    ->catch(function ($error) {
+        echo "Error: " . $error->getMessage() . "\n";
+    });
+
 echo "Calling batch methods...\n";
 
 $client->batch([
@@ -101,8 +113,38 @@ $client->batch([
     echo "Batch error: " . $error->getMessage() . "\n";
 });
 
-// Run for a short time then exit
-$loop->addTimer(2.0, function () use ($loop) {
+echo "\nCalling async_fetch in batch (testing concurrency)...\n";
+$batchStartTime = microtime(true);
+$client->batch([
+    ['async_fetch', ['url' => 'https://example.com/api/user/1']],
+    ['async_fetch', ['url' => 'https://example.com/api/user/2']],
+    ['async_fetch', ['url' => 'https://example.com/api/user/3']],
+    ['async_fetch', ['url' => 'https://example.com/api/user/4']],
+    ['async_fetch', ['url' => 'https://example.com/api/user/5']],
+])
+->then(function ($responses) use ($batchStartTime) {
+    $batchDuration = microtime(true) - $batchStartTime;
+    echo "Batch async_fetch results (" . count($responses) . " responses):\n";
+    foreach ($responses as $index => $response) {
+        if ($response instanceof ResultResponse) {
+            $value = $response->getValue();
+            echo "  [$index] URL: " . ($value['url'] ?? 'N/A') . ", Status: " . ($value['status'] ?? 'N/A') . "\n";
+        } elseif ($response instanceof ErrorResponse) {
+            echo "  [$index] Error: " . $response->getMessage() . " (code: " . $response->getCode() . ")\n";
+        } else {
+            echo "  [$index] Unknown response type\n";
+        }
+    }
+    echo "\nBatch duration: " . number_format($batchDuration * 1000, 2) . "ms\n";
+    echo "Expected duration if sequential: ~2500ms (5 calls × 500ms each)\n";
+    echo "If concurrent, duration should be ~500ms (single call duration)\n";
+})
+->catch(function ($error) {
+    echo "Batch async_fetch error: " . $error->getMessage() . "\n";
+});
+
+// Run for a longer time to allow async operations to complete
+$loop->addTimer(4.0, function () use ($loop) {
     echo "\nDone!\n";
     $loop->stop();
 });

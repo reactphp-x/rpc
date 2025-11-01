@@ -14,6 +14,7 @@ if (file_exists(__DIR__ . '/../../vendor/autoload.php')) {
 use Datto\JsonRpc\Server as JsonRpcServer;
 use Clue\React\NDJson\Decoder;
 use Clue\React\NDJson\Encoder;
+use React\Promise\PromiseInterface;
 use function React\Async\async;
 
 // Get evaluator class name from command line argument
@@ -61,7 +62,58 @@ $decoder->on('data', async(function (array $data) use ($rpcServer, $encoder) {
         
         // Only send response for queries (notifications return null)
         if ($response !== null) {
-            $encoder->write($response);
+            // Check if the response has a 'result' field that is a Promise
+            if (is_array($response) && isset($response['result']) && $response['result'] instanceof PromiseInterface) {
+                // Wait for the Promise to resolve
+                $response['result']->then(function ($resolvedValue) use ($encoder, $response, $data) {
+                    // Create response with resolved value
+                    $encoder->write([
+                        'jsonrpc' => '2.0',
+                        'id' => $data['id'] ?? null,
+                        'result' => $resolvedValue
+                    ]);
+                })->catch(function (\Throwable $e) use ($encoder, $data) {
+                    // Send error response
+                    $encoder->write([
+                        'jsonrpc' => '2.0',
+                        'id' => $data['id'] ?? null,
+                        'error' => [
+                            'code' => -32603,
+                            'message' => 'Internal error',
+                            'data' => $e->getMessage()
+                        ]
+                    ]);
+                });
+            } elseif ($response instanceof PromiseInterface) {
+                // If the entire response is a Promise
+                $response->then(function ($resolvedResponse) use ($encoder, $data) {
+                    // If the resolved value is still an array (JSON-RPC response), send it
+                    if (is_array($resolvedResponse)) {
+                        $encoder->write($resolvedResponse);
+                    } else {
+                        // Otherwise, create a proper JSON-RPC response with the resolved value
+                        $encoder->write([
+                            'jsonrpc' => '2.0',
+                            'id' => $data['id'] ?? null,
+                            'result' => $resolvedResponse
+                        ]);
+                    }
+                })->catch(function (\Throwable $e) use ($encoder, $data) {
+                    // Send error response
+                    $encoder->write([
+                        'jsonrpc' => '2.0',
+                        'id' => $data['id'] ?? null,
+                        'error' => [
+                            'code' => -32603,
+                            'message' => 'Internal error',
+                            'data' => $e->getMessage()
+                        ]
+                    ]);
+                });
+            } else {
+                // Non-promise response, send directly
+                $encoder->write($response);
+            }
         }
     } catch (\Throwable $e) {
         // Send error response

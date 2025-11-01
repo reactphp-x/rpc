@@ -3,10 +3,10 @@
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/SimpleEvaluator.php';
 
 use React\EventLoop\Loop;
 use React\Socket\SocketServer;
-use ReactphpX\Rpc\Evaluator;
 use ReactphpX\Rpc\Http\HttpServer;
 use ReactphpX\Rpc\AccessLogHandler;
 
@@ -25,22 +25,6 @@ $debug = isset($argv[2]) && ($argv[2] === 'true' || $argv[2] === '1');
 if (!is_numeric($port) || $port < 1 || $port > 65535) {
     echo "Error: Invalid port number. Must be between 1 and 65535.\n";
     exit(1);
-}
-
-// Create a simple evaluator that implements methods
-class SimpleEvaluator implements Evaluator
-{
-    public function evaluate($method, $arguments)
-    {
-        return match ($method) {
-            'add' => array_sum($arguments ?? []),
-            'subtract' => ($arguments[0] ?? 0) - ($arguments[1] ?? 0),
-            'multiply' => array_product($arguments ?? []),
-            'echo' => $arguments[0] ?? null,
-            'greet' => 'Hello, ' . ($arguments['name'] ?? 'World') . '!',
-            default => throw new \RuntimeException("Method '{$method}' not found", -32601),
-        };
-    }
 }
 
 $loop = Loop::get();
